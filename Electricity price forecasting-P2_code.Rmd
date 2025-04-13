@@ -215,19 +215,16 @@ lagged_data <- na.omit(lagged_data)
 # 
 # timestamps <- seq(start_date, end_date, by = "hour")
 # 
-# # Create a data frame with all timestamps and initialize the value column to 0
 # df <- data.frame(timestamp = timestamps, value = 0)
 # 
 # # Load the holiday data
 # holidays <- holidays_2000_2030
 # 
-# # Convert the holiday Date column to Date type
 # holidays$Date <- as.Date(holidays$Date)
 # 
-# # Create a vector of holiday dates
+# # vector of holiday dates
 # holiday_dates <- unique(holidays$Date)
 # 
-# # Update the value column for holidays
 # holidays_df_new <- df %>%
 #   mutate(date = as.Date(timestamp)) %>%
 #   mutate(value = ifelse(date %in% holiday_dates, 1, value)) %>%
@@ -256,16 +253,13 @@ pacf(growth_rates[-1], main="PACF for growth rates of the original series")
 
 # Function to calculate growth rates and winsorize them while handling NAs
 calculate_and_winsorize_with_nas <- function(x) {
-  # Calculate growth rates with NAs
+  
   growth_rate <- c(NA, diff(x) / x[-length(x)])
   
-  # Handle NAs before winsorizing
   valid_growth_rate <- growth_rate[!is.na(growth_rate)]
   
-  # Winsorize valid growth rates
   winsorized_valid_growth_rate <- Winsorize(valid_growth_rate, probs = c(0.05, 0.95))
   
-  # Place the winsorized values back in the original positions
   growth_rate[!is.na(growth_rate)] <- winsorized_valid_growth_rate
   
   return(growth_rate)
