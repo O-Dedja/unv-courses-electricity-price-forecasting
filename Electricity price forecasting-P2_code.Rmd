@@ -1,0 +1,414 @@
+---
+title: "p2"
+author: "Osman Dedja"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+*For a better view please use "Visual" viewing for .Rmd instead of "Source".*
+
+### Libraries
+
+```{r}
+library(lubridate)
+library(prophet)
+library(dplyr)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(imputeTS)
+library(tidyr)
+library(zoo)
+library(urca)
+library(rpart)
+library(caret)
+library(randomForest)
+library(rpart.plot)
+library(DescTools)
+```
+
+### Loading files
+
+```{r}
+actual_generation_by_type <- Actual_generation_201501010000_202404020000_Hour
+day_ahead_prices_by_country <- Day.ahead_prices_201501010000_202404020000_Hour
+
+directory <- "/Users/osmandedja/unv/CS/project2/entsoe_dayaheadprice_2015-2018"
+files_dir <- list.files(path = directory, pattern = "\\.csv$", full.names = TRUE)
+data_list_dir <- lapply(files_dir, read.delim)
+day_ahead_price_2015to2018 <- do.call(rbind, data_list_dir)
+day_ahead_price_2015to2018 <- day_ahead_price_2015to2018[,c(1,6,7)]
+```
+
+### Generation by type & filtering day ahead price
+
+```{r}
+actual_generation_by_type$Start.date <- as.POSIXct(actual_generation_by_type$Start.date, format = "%b %d, %Y %I:%M %p", tz = "CET")
+day_ahead_prices_by_country$Start.date <- as.POSIXct(day_ahead_prices_by_country$Start.date, format = "%b %d, %Y %I:%M %p", tz = "CET")
+day_ahead_price_2015to2018$DateTime <- as.POSIXct(day_ahead_price_2015to2018$DateTime,  format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+
+actual_generation_by_type <- actual_generation_by_type[order(actual_generation_by_type$Start.date), ]
+day_ahead_prices_by_country <- day_ahead_prices_by_country[order(day_ahead_prices_by_country$Start.date), ]
+day_ahead_price_2015to2018 <- day_ahead_price_2015to2018[order(day_ahead_price_2015to2018$DateTime), ]
+
+day_ahead_price_2015to2018 <- day_ahead_price_2015to2018 %>% filter( startsWith(MapCode,"DE_AT_LU"))
+```
+
+### Day ahead price for 2015-2018
+
+```{r}
+
+combined_data <- day_ahead_price_2015to2018
+
+start_date1 <- as.POSIXct("2015-01-01 00:00:00")
+end_date1 <- as.POSIXct("2015-01-04 22:00:00")
+datetime_seq <- seq(from = start_date1, to = end_date1, by = "hour")
+first4days <- data.frame(DateTime = datetime_seq, MapCode = NA, Price = NA)
+
+combined_data <- bind_rows(first4days, combined_data)
+combined_data <- combined_data[1:(length(combined_data$DateTime)-4),]
+
+
+#looking for missing values
+
+start_date <- as.POSIXct("2015-01-01 00:00:00", format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+end_date <- as.POSIXct("2018-09-30 21:00:00", format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+all_dates <- seq(from = start_date, to = end_date, by = "hour", tz = "CET")
+
+new_dates <- combined_data$DateTime
+missing_dates <- setdiff(all_dates, new_dates)
+missing_dates_converted <- as.POSIXct(missing_dates, origin = "1970-01-01", tz = "CET")
+
+
+# addinf the missing dates
+missing_dates_df <- data.frame(
+  DateTime = missing_dates,
+  MapCode = NA,
+  Price = NA)
+
+missing_dates_df$DateTime <- as.POSIXct(missing_dates_df$DateTime, format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+
+combined_data_with_missing <- rbind(combined_data, missing_dates_df)
+combined_data_with_missing <- combined_data_with_missing[order(combined_data_with_missing$DateTime), ]
+rownames(combined_data_with_missing) <- NULL
+
+#authenticating the addition
+new_dates <- combined_data_with_missing$DateTime
+missing_dates <- setdiff(all_dates, new_dates)
+missing_dates_converted <- as.POSIXct(missing_dates, origin = "1970-01-01", tz = "CET")
+#done
+
+# combining all the data together
+colnames(combined_data_with_missing)[1] <- "Start.date"
+
+day_ahead_prices_by_country$Start.date <- as.POSIXct(day_ahead_prices_by_country$Start.date, format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+combined_data_with_missing$Start.date <- as.POSIXct(combined_data_with_missing$Start.date, format = "%Y-%m-%d %H:%M:%S", tz = "CET")
+
+merged_data <- merge(day_ahead_prices_by_country, combined_data_with_missing[, c("Start.date", "Price")], by = "Start.date", all.x = TRUE)
+
+merged_data$Germany.Luxembourg....MWh..Original.resolutions <- ifelse(
+  is.na(merged_data$Germany.Luxembourg....MWh..Original.resolutions),
+  merged_data$Price, merged_data$Germany.Luxembourg....MWh..Original.resolutions)
+
+merged_data <- merged_data[, !names(merged_data) %in% c("Price")]
+
+
+########
+day_ahead_prices_by_country_complete <- merged_data
+```
+
+### Weather data
+
+```{r}
+
+combined_population_weighted_hourly_data <- read.csv("~/unv/CS/project2/weather data/combined_population_weighted_hourly_data.csv")
+
+combined_weighted_hourly_data <- read.csv("~/unv/CS/project2/weather data/combined_weighted_hourly_data.csv")
+
+weather_data <- data.frame(date = combined_population_weighted_hourly_data$date,
+  temperature_2m = (combined_population_weighted_hourly_data$temperature_2m + combined_weighted_hourly_data$temperature_2m) / 2,
+  cloud_cover = (combined_population_weighted_hourly_data$cloud_cover + combined_weighted_hourly_data$cloud_cover) / 2,
+  wind_speed_10m = (combined_population_weighted_hourly_data$wind_speed_10m + combined_weighted_hourly_data$wind_speed_10m) / 2)
+
+########
+weather_data <- weather_data[3:81098,]
+rownames(weather_data) <- NULL
+
+weather_data$date <- ymd_hms(weather_data$date, tz = "UTC")
+
+weather_data$date <- as.POSIXct(weather_data$date, tz = "UTC")
+
+weather_data <- weather_data[1:81095,]
+```
+
+### Binding all data together
+
+```{r}
+
+collectedData <- cbind(day_ahead_prices_by_country_complete[,-2],actual_generation_by_type[,-c(1,2)], weather_data[,-1])
+
+colnames(collectedData) <- c("Start_date", "DE_LU_MWh", "X_DE_LU_neighbours_MWh", "Belgium_MWh", "Denmark_1_MWh", "Denmark_2_MWh", "France_MWh", "Netherlands_MWh", "Norway_2_MWh", "Austria_MWh", "Poland_MWh", "Sweden_4_MWh", "Switzerland_MWh", "Czech_Republic_MWh", "DE_AT_LU_MWh", "Northern_Italy_MWh", "Slovenia_MWh", "Hungary_MWh", "Biomass_MWh", "Hydropower_MWh", "Wind_offshore_MWh", "Wind_onshore_MWh", "Photovoltaics_MWh", "Other_renewable_MWh", "Nuclear_MWh", "Lignite_MWh", "Hard_coal_MWh", "Fossil_gas_MWh", "Hydro_pumped_storage_MWh", "Other_conventional_MWh", "Temperature_2m", "Cloud_cover", "Wind_speed_10m")
+
+```
+
+### Filling the NAs with interpolated values
+
+```{r}
+ 
+collectedData[,-1] <- collectedData[,-1] %>%
+  mutate(across(everything(), ~ gsub(",", "", .)))
+collectedData[,-1] <- lapply(collectedData[,-1], as.numeric)
+
+#filling the NAs
+# data_filled <- cbind(collectedData[,1], collectedData[,-1] %>%
+#   mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .))))
+
+data_filled <- collectedData %>%
+  mutate_at(vars(-1), as.numeric) %>%
+  mutate(across(everything(), ~ na_kalman(ts(.), model = "auto.arima")))
+data_filled_reserve <- data_filled
+
+data_filled <- data_filled_reserve
+#data_filled$Start_date <- as.numeric(as.character(data_filled$Start_date))
+
+# Convert Start_date from Unix timestamp to POSIXct
+data_filled$Start_date <- as.POSIXct(data_filled$Start_date, origin = "1970-01-01", tz = "CET")
+
+```
+
+### Balancing the series
+
+```{r}
+
+#growth rates
+price_only <- data_filled$DE_LU_MWh
+price_only[price_only == 0] <- 1e-3
+
+growth_rates <- c(NA, (price_only[-1] - price_only[-(length(price_only))])/price_only[-(length(price_only))])
+
+plot(head(growth_rates, 999))
+plot(log(growth_rates), type="l")
+
+outliers<- boxplot.stats(growth_rates)$out
+
+min_abs_outlier <- min(abs(outliers))
+
+growth_rates[growth_rates %in% outliers] <- min_abs_outlier * sign(growth_rates[growth_rates %in% outliers])
+
+
+lagged_data <- data.frame(growth_rates)
+for (i in 1:10) {
+  lagged_data[[paste0("lag_", i)]] <- dplyr::lag(growth_rates, i)
+}
+
+lagged_data <- na.omit(lagged_data)
+
+
+
+############ holidays
+
+# holidays_2000_2030 <- read.csv("~/unv/AFEM 3/holidays_2000_2030.csv")
+# 
+# 
+# start_date <- as.POSIXct("2015-01-01 00:00:00", tz = "CET")
+# end_date <- as.POSIXct("2024-04-01 23:00:00", tz = "CET")
+# 
+# timestamps <- seq(start_date, end_date, by = "hour")
+# 
+# # Create a data frame with all timestamps and initialize the value column to 0
+# df <- data.frame(timestamp = timestamps, value = 0)
+# 
+# # Load the holiday data
+# holidays <- holidays_2000_2030
+# 
+# # Convert the holiday Date column to Date type
+# holidays$Date <- as.Date(holidays$Date)
+# 
+# # Create a vector of holiday dates
+# holiday_dates <- unique(holidays$Date)
+# 
+# # Update the value column for holidays
+# holidays_df_new <- df %>%
+#   mutate(date = as.Date(timestamp)) %>%
+#   mutate(value = ifelse(date %in% holiday_dates, 1, value)) %>%
+#   select(-date)
+
+```
+
+#### Exploring the data
+
+```{r}
+par(mfrow =c(2,1))
+plot(x=data_filled$Start_date, data_filled$DE_LU_MWh, type = "l",xlab="Time", ylab="Price", main = "Original Series")
+pacf(data_filled$DE_LU_MWh, main="PACF of Original Series")
+
+par(mfrow =c(2,1))
+plot(x=data_filled$Start_date, growth_rates, type = "l",xlab="Time", ylab="Returns", main = "Growth rates of the original series",  ylim = c(-0.3, 0.3))
+pacf(growth_rates[-1], main="PACF for growth rates of the original series")
+```
+
+```{r}
+########now other columns
+
+#explanatory_vars_differentiated <- as.data.frame(apply(data_filled[,-c(1,2)], 2, diff))
+#explanatory_vars_logged_differentiated <- as.data.frame(apply(log(data_filled[,-c(1,2)]), 2, diff))
+
+
+# Function to calculate growth rates and winsorize them while handling NAs
+calculate_and_winsorize_with_nas <- function(x) {
+  # Calculate growth rates with NAs
+  growth_rate <- c(NA, diff(x) / x[-length(x)])
+  
+  # Handle NAs before winsorizing
+  valid_growth_rate <- growth_rate[!is.na(growth_rate)]
+  
+  # Winsorize valid growth rates
+  winsorized_valid_growth_rate <- Winsorize(valid_growth_rate, probs = c(0.05, 0.95))
+  
+  # Place the winsorized values back in the original positions
+  growth_rate[!is.na(growth_rate)] <- winsorized_valid_growth_rate
+  
+  return(growth_rate)
+}
+
+explanatory_vars_differentiated <- as.data.frame(apply(data_filled[,-c(1,2)], 2, calculate_and_winsorize_with_nas))
+
+
+
+
+explanatory_vars_differentiated <- explanatory_vars_differentiated[13:81096,]
+
+#### putting all stationary data together and lagging the explanatori variables with by one hour
+
+
+
+all_data_stationary <- as.data.frame(cbind(data_filled$Start_date[12:81095], lagged_data, explanatory_vars_differentiated))
+
+#all_data_stationary$`tail(data_filled$Start_date, 81084)` <- as.POSIXct(all_data_stationary$`tail(data_filled$Start_date, 81084)`)
+
+names(all_data_stationary) <- c("Start_date", names(lagged_data), names(explanatory_vars_differentiated))
+holidays_df <- holidays_df_new[12:81095,]
+
+
+
+all_data_stationary <- cbind(all_data_stationary, holidays_df)
+all_data_stationary$timestamp <- NULL
+colnames(all_data_stationary)[44] <- "Holiday_Dummy"
+
+
+all_data_stationary$Start_date <- as.POSIXct(all_data_stationary$Start_date)
+
+#### adding time effects
+all_data_stationary_new <- all_data_stationary %>%
+  mutate(hour_of_day = hour(Start_date),
+         day_of_year = yday(Start_date),
+         day_of_week = wday(Start_date, label = TRUE),
+         day_of_week_sunday = as.integer(wday(Start_date) == 1),
+         day_of_week_saturday = as.integer(wday(Start_date) == 7),
+         day_of_week_monday = as.integer(wday(Start_date) == 2))
+
+
+```
+
+### Task A
+
+#### Regression tree
+
+```{r}
+
+# Data Preparation
+train_size <- floor(0.8 * nrow(lagged_data))
+train_data <- lagged_data[1:train_size, ]
+test_data <- lagged_data[(train_size + 1):nrow(lagged_data), ]
+
+# Model Training
+#regression_tree <- rpart(growth_rates ~ ., data = train_data, method = "anova") 
+
+# Predictions
+n_test <- nrow(test_data)
+predictions <- numeric(n_test)
+actuals <- test_data$growth_rates
+current_lags <- as.numeric(tail(train_data, 1)[-1])
+
+for (i in 1:n_test) {
+  new_data <- data.frame(t(current_lags))
+  colnames(new_data) <- names(train_data)[-1]
+  predictions[i] <- predict(regression_tree, newdata = new_data)
+  current_lags <- c(actuals[i], current_lags[1:9]) # Integrating actual test data value
+}
+
+# RMSE Calculation
+rmse_trees_with_lags <- sqrt(mean((predictions - actuals)^2))
+print(paste("RMSE:", rmse_trees_with_lags))
+
+# Plotting
+comparison_df_rtrees <- data.frame(Index = (train_size + 1):(train_size + n_test), Actual = actuals, Predicted = predictions)
+
+ggplot(head(comparison_df_rtrees, 999), aes(x = Index)) +
+  geom_line(aes(y = Actual), color = "blue") +
+  geom_line(aes(y = Predicted), color = "red") +
+  labs(title = "Actual vs Predicted Growth Rates Over Time (Regression Trees)", x = "Index", y = "Growth Rate")
+
+
+rpart.plot(regression_tree)
+
+```
+
+#### Random forest
+
+```{r}
+
+train_size <- floor(0.8 * nrow(lagged_data))
+train_data <- lagged_data[1:train_size, ]
+test_data <- lagged_data[(train_size + 1):nrow(lagged_data), ]
+
+
+set.seed(123)
+#random_forest_model <- randomForest(growth_rates ~ ., data = train_data, ntree = 1000)
+
+# Predictions
+n_test <- nrow(test_data)
+predictions_rf <- numeric(n_test)
+actuals <- test_data$growth_rates
+current_lags <- as.numeric(tail(train_data, 1)[-1])
+
+for (i in 1:n_test) {
+  new_data <- data.frame(t(current_lags))
+  colnames(new_data) <- names(train_data)[-1]
+  predictions_rf[i] <- predict(random_forest_model, newdata = new_data)
+  current_lags <- c(actuals[i], current_lags[1:9])
+}
+
+
+rmse_rf_with_lags <- sqrt(mean((predictions_rf - actuals)^2))
+print(paste("RMSE (Random Forest):", rmse_rf_with_lags))
+
+
+comparison_df_rf <- data.frame(Index = (train_size + 1):(train_size + n_test), Actual = actuals, Predicted = predictions_rf)
+
+ggplot(head(comparison_df_rf, 399), aes(x = Index)) +
+  geom_line(aes(y = Actual), color = "blue") +
+  geom_line(aes(y = Predicted), color = "red") +
+  labs(title = "Actual vs Predicted Growth Rates Over Time (Random Forest)", x = "Index", y = "Growth Rate") +
+  theme_minimal()
+
+
+random_forest_model$importance
+```
+
+#### Feature investigation
+
+```{r}
+if (!requireNamespace("corrplot", quietly = TRUE)) {
+  install.packages("corrplot")
+  library(corrplot)
+}
+autocorr_matrix <- cor(data_filled[,-1])
+corrplot(autocorr_matrix, method = "shade")
+
+
+
+```
+
+#### For tasks B, C, D, and Weather, see the python code.
+
