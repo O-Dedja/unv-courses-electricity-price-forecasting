@@ -1,4 +1,4 @@
-# Electricity Price Forecasting in Germany
+# Electricity Price Forecasting in Germany (Showcase only)
 
 ## Overview
 This project implements machine learning models to forecast day-ahead electricity prices in Germany as part of my university course Case Studies. It builds on my previous work that used classical linear models for electricity load forecasting. The project explores decision trees and random forests for more accurate price predictions and is shown only for showcase purposes only.
